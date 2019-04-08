@@ -1,0 +1,8 @@
+[package]
+name = "tlv_message"
+version = "0.1.0"
+authors = ["oribenshir <oribenshir@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+byteorder = "1.3.1"

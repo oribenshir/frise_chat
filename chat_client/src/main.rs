@@ -36,6 +36,7 @@ fn main() -> io::Result<()> {
             let message = Message::from_reader(&mut reader).expect("failed to read from connection");
             let result = message.data().read_to_string(&mut line).expect("failed to read data from message");
             println!("Room: {}", line);
+            line.clear();
         }
     });
 
@@ -62,6 +63,7 @@ fn main() -> io::Result<()> {
                 first = false;
                 writer.write(buffer.as_bytes())?;
             }
+            println!("flush");
             writer.flush()?;
         }
 

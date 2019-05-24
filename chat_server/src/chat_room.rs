@@ -4,7 +4,7 @@ use std::{
     sync::mpsc,
 };
 
-use tlv_message::message::Message;
+use tlv_message::message::{AsyncReader, AsyncWriter, Message};
 
 pub struct ChatRoom {
     // All client currently in the chat room (Each client has a dedicate stream)
@@ -26,39 +26,22 @@ impl ChatRoom {
         let message_queue = &mut self.message_queue;
 
         stream_list.iter_mut().for_each(|stream| {
-            let message = Message::from_reader(stream).expect("failed to read from connection");
-            message_queue.push(message);
-            /*
-            let mut len_buffer: [u8;  mem::size_of::<usize>()] = [0;  mem::size_of::<usize>()];
-
-            //TODO: This is not a real async, it will loop until all information is available
-            stream.read_exact(len_buffer.as_mut()).expect("Failed to read message length");
-
-            let mut read = 0;
-            while read < mem::size_of::<usize>() {
-                let _ = stream.read(&mut len_buffer.as_mut()[read..]).map(|x| {
-                    println!("{}", x);
-                    read += x;
-                });
+            //let message = Message::from_reader(stream).expect("failed to read from connection");
+            // TODO: we are going to change the finish interface. Therefore each stream might start with unready reader from previous run
+            // We need to do 2 things:
+            // 1. wrap TcpStream with a struct that contain a TcpStream and an Optional Reader
+            // 2. Adjust this code:
+            //      a. if no reader, create one else use the existing one
+            //      b. read loop can stays the same
+            //      c. finish should check for enum result, which can contain error as today, but in case everything went well, it might have either a message (everything went alright) or reader (no data was read)
+            let mut receiver = AsyncReader::<Message>::new();
+            while !receiver.done() {
+                println!("async_read hopefully");
+                receiver.async_read(stream);
             }
-            let length = NetworkEndian::read_u64(&len_buffer);
-            //len_buffer.read_u64::<NetworkEndian>().expect("Failed to read message length");
-            println!("Going to read message of length {}", length);
 
-            // All elements can be initialized to the same value
-            let mut buffer: [u8; 1024] = [0; 1024];
-            let _ = stream.read(buffer.as_mut()).map(|x| {
-                if x > 0 {
-                    println!("msg {}", x);
-                    let mut sent_buffer = Vec::with_capacity(x);
-                    for i in 0..x {
-                        sent_buffer.push(buffer[i]);
-                    }
-                    println!("reading new message from a client");
-                    message_queue.push(sent_buffer);
-                }
-            });
-            */
+            let message = receiver.finish().expect("failed to read from connection");
+            message_queue.push(message);
         });
     }
 
@@ -71,7 +54,12 @@ impl ChatRoom {
             stream_list.iter_mut().for_each(|mut stream| {
                 while let Some(message) = message_queue.pop() {
                     println!("Sending {:?} to a client", std::str::from_utf8(message.data()).unwrap());
-                    message.into_writer(&mut stream).expect("Failed to write message");
+                    let mut writer = AsyncWriter::<Message>::new(message);
+                    while !writer.done() {
+                        println!("async_write hopefully");
+                        writer.async_write(stream);
+                    }
+                    //message.into_writer(&mut stream).expect("Failed to write message");
                 }
             });
             // We've sent all the messages in the queue, we can clear it now
@@ -86,19 +74,23 @@ pub fn chat_room_handler(receiver: mpsc::Receiver<TcpStream>) -> io::Result<()> 
     let mut chat_room = ChatRoom::new();
 
     loop {
+        println!("looping");
         // Look for a new connection to the chat room
         let _ = receiver.try_recv().map(|stream| {
             println!("Received a new connection to the room");
             // TODO: Uncomment when message implement async read
-            //stream.set_nonblocking(true).expect("Failed to set socket as non blocking");
+            stream.set_nonblocking(true).expect("Failed to set socket as non blocking");
             //stream.set_read_timeout(Some(Duration::new(1, 0))).expect("Failed to set read timeout on socket");
             //stream.set_write_timeout(Some(Duration::new(1, 0))).expect("Failed to set read timeout on socket");
             chat_room.stream_list.push(stream);
         });
+        println!("looking for new messages");
         // Look for a new message from any of the room's clients
         chat_room.look_for_new_message();
+        println!("broadcasting pending messages");
         // Broadcast received messages to all room's members
         chat_room.broadcast_pending_messages();
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
     println!("Closing chat room");

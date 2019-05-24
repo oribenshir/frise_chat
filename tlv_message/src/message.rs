@@ -9,7 +9,8 @@ use crate::message::Async::{NotReady, Ready};
 
 //TODO: We assume we read/write data in network endianness, we should be able to support reading/writing it from/to native endianness as well
 // TODO: If message will implement read trait directly, it will be really easy to compose it with stream (and iterator)
-// TODO: We should be able to return not_ready. The client should be able to continue on partial message.
+// TODO: We should be able to return not_ready for write. The client should be able to continue on partial message.
+// TODO: For some weird reason, the reader won't read if there is only a small number of bytes in the stream.
 #[derive(Default, Debug)]
 pub struct Message {
     message_type : [u8;2],
@@ -61,6 +62,7 @@ pub struct AsyncReader<T : ByteBuffer + Default> {
     buffer : T,
     bytes_read : usize,
     done : bool,
+    ready : bool,
     error : Option<io::Error>
 }
 
@@ -68,7 +70,20 @@ pub struct AsyncWriter<T : ByteBuffer + Default> {
     buffer : T,
     bytes_written : usize,
     done : bool,
+    ready: bool,
     error : Option<io::Error>
+}
+
+pub enum AsyncReadResult<T>
+    where T : ByteBuffer + Default {
+    Ready(T),
+    NotReady(AsyncReader<T>)
+}
+
+pub enum AsyncWriteResult<T>
+    where T : ByteBuffer + Default {
+    Ready,
+    NotReady(AsyncWriter<T>)
 }
 
 impl<T : ByteBuffer + Default> AsyncReader<T> {
@@ -77,6 +92,7 @@ impl<T : ByteBuffer + Default> AsyncReader<T> {
             buffer : T::default(),
             bytes_read : 0,
             done : false,
+            ready : false,
             error : None
         }
     }
@@ -87,30 +103,44 @@ impl<T : ByteBuffer + Default> AsyncReader<T> {
 
     // Calling finish on unready object will panic
     // Should return an enum: T if ready, self if not ready, error if error
-    pub fn finish(self) -> io::Result<T> {
+    pub fn finish(mut self) -> io::Result<AsyncReadResult<T>> {
         if !self.done {
             panic!("Called finish on message, but reading is not done");
         }
 
-        match self.error {
-            Some(e) => Err(e),
-            None => Ok(self.buffer)
+        if let Some(e) = self.error {
+            return Err(e)
         }
+
+        if self.ready {
+            return Ok(AsyncReadResult::Ready(self.buffer))
+        } else {
+            // Clear the done status for the next run
+            self.done = false;
+            return Ok(AsyncReadResult::NotReady(self))
+        }
+
     }
 
     pub fn async_read<R : AsyncRead>(&mut self, reader : &mut R) {
         let buffer = self.buffer.get_storage(self.bytes_read);
-        match reader.partial_read_async(buffer) {
-            AsyncResult::Ok(Async::NotReady) => {
-                self.done = true;
-                ()
-            },
-            AsyncResult::Ok(Async::Ready(0)) => self.done = true,
-            AsyncResult::Ok(Async::Ready(bytes)) => self.bytes_read += bytes,
-            AsyncResult::Ok(_) => (), // To make the linter relax
-            AsyncResult::Err(error) => {
-                self.error = Some(error);
-                self.done = true;
+        if buffer.is_empty() {
+            self.ready = true;
+            self.done = true;
+        } else {
+            match reader.partial_read_async(buffer) {
+                AsyncResult::Ok(Async::NotReady) => {
+                    self.done = true;
+                },
+                AsyncResult::Ok(Async::Ready(0)) => {
+                    self.done = true;
+                    self.ready = true;
+                },
+                AsyncResult::Ok(Async::Ready(bytes)) => self.bytes_read += bytes,
+                AsyncResult::Err(error) => {
+                    self.error = Some(error);
+                    self.done = true;
+                }
             }
         }
     }
@@ -122,6 +152,7 @@ impl<T : ByteBuffer + Default> AsyncWriter<T> {
             buffer,
             bytes_written : 0,
             done : false,
+            ready: false,
             error : None
         }
     }
@@ -131,14 +162,21 @@ impl<T : ByteBuffer + Default> AsyncWriter<T> {
     }
 
     // Calling finish on unready object will panic
-    pub fn finish(self) -> io::Result<(T)> {
+    pub fn finish(mut self) -> io::Result<AsyncWriteResult<T>> {
         if !self.done {
-            panic!("Called finish on message, but reading is not done");
+            panic!("Called finish on message, but writing is not done");
         }
 
-        match self.error {
-            Some(e) => Err(e),
-            None => Ok(self.buffer)
+        if let Some(e) = self.error {
+            return Err(e)
+        }
+
+        if self.ready {
+            return Ok(AsyncWriteResult::Ready)
+        } else {
+            // Clear the done status for the next run
+            self.done = false;
+            return Ok(AsyncWriteResult::NotReady(self))
         }
     }
 
@@ -147,11 +185,12 @@ impl<T : ByteBuffer + Default> AsyncWriter<T> {
         match writer.partial_write_async(buffer) {
             AsyncResult::Ok(Async::NotReady) => {
                 self.done = true;
-                ()
             },
-            AsyncResult::Ok(Async::Ready(0)) => self.done = true,
+            AsyncResult::Ok(Async::Ready(0)) => {
+                self.done = true;
+                self.ready = true;
+            },
             AsyncResult::Ok(Async::Ready(bytes)) => self.bytes_written += bytes,
-            AsyncResult::Ok(_) => (), // To make the linter relax
             AsyncResult::Err(error) => {
                 self.error = Some(error);
                 self.done = true;

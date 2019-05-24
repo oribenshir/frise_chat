@@ -53,17 +53,10 @@ fn main() -> io::Result<()> {
                 println!("Writing to chat {} bytes: {}", buffer.len(), buffer);
                 let message = Message::new(1, buffer.len() as u32, buffer.clone().into_bytes());
                 message.into_writer(writer.by_ref())?;
-                /*
-                let mut bs = [0u8; mem::size_of::<usize>()];
-                bs.as_mut()
-                    .write_u64::<NetworkEndian>(buffer.len() as u64)?;
-                writer.by_ref().write(&bs)?;
-                */
             } else {
                 first = false;
                 writer.write(buffer.as_bytes())?;
             }
-            println!("flush");
             writer.flush()?;
         }
 

@@ -3,72 +3,18 @@ use std::io;
 use std::io::Read;
 use std::borrow::Borrow;
 use std::string::String;
-use byteorder::{NetworkEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
+use byteorder::{NetworkEndian, ByteOrder, ReadBytesExt, WriteBytesExt, NativeEndian};
 use std::net::TcpStream;
 use crate::message::Async::{NotReady, Ready};
 
+//TODO: We assume we read/write data in network endianness, we should be able to support reading/writing it from/to native endianness as well
 // TODO: If message will implement read trait directly, it will be really easy to compose it with stream (and iterator)
 // TODO: We should be able to return not_ready. The client should be able to continue on partial message.
 #[derive(Default, Debug)]
 pub struct Message {
-    message_type : u16,
-    length : u32,
+    message_type : [u8;2],
+    length : [u8;4],
     data : Vec<u8>
-}
-
-pub enum DataWrapper<'a> {
-    Empty,
-    /*
-        For Integers use the Small option.
-        You can specify only parts of the data is valid:
-        a. For smaller integers (u16,u32 etc..)
-        b. For partial int information (e.g. you have written only parts of the information)
-    */
-    Small([u8;8], usize, usize),
-
-    LargeBorrowed(&'a mut[u8]),
-    //LargeOwned(Vec<u8>)
-}
-
-impl<'a> DataWrapper<'a> {
-    pub fn as_buffer(&mut self) -> &mut[u8] {
-        match self {
-            DataWrapper::Empty => &mut[],
-            DataWrapper::Small(data, from, to) => &mut data[*from..*to],
-            DataWrapper::LargeBorrowed(data) => data
-        }
-    }
-
-    pub fn from_u16(data : u16) -> DataWrapper<'a> {
-        let mut buffer :[u8; 8] = [0;8];
-        NetworkEndian::write_u16(&mut buffer[..], data);
-        DataWrapper::Small(buffer, 0, std::mem::size_of::<u16>())
-    }
-
-    pub fn from_partial_u16(data : u16, from : usize, to : usize) -> DataWrapper<'a> {
-        if to > 8 || from > to {
-            panic!("Invalid range given");
-        }
-        let mut buffer :[u8; 8] = [0;8];
-        NetworkEndian::write_u16(&mut buffer[..], data);
-        DataWrapper::Small(buffer, from, to)
-    }
-
-    pub fn from_u32(data : u32) -> DataWrapper<'a> {
-        let mut buffer :[u8; 8] = [0;8];
-        NetworkEndian::write_u32(&mut buffer[..], data);
-        DataWrapper::Small(buffer, 0, std::mem::size_of::<u32>())
-    }
-
-    pub fn from_partial_u32(data : u32, from : usize, to : usize) -> DataWrapper<'a> {
-        if to > 8 || from > to {
-            panic!("Invalid range given");
-        }
-
-        let mut buffer :[u8; 8] = [0;8];
-        NetworkEndian::write_u32(&mut buffer[..], data);
-        DataWrapper::Small(buffer, from, to)
-    }
 }
 
 pub enum Async<T> {
@@ -82,7 +28,7 @@ pub enum AsyncResult<T,E> {
 }
 
 pub trait ByteBuffer {
-    fn get_data(&mut self, location : usize) -> DataWrapper;
+    fn get_data(&mut self, location : usize) -> &mut [u8];
     fn get_storage(&mut self, location : usize) -> &mut [u8];
 }
 
@@ -169,21 +115,6 @@ impl<T : ByteBuffer + Default> AsyncReader<T> {
         }
     }
 }
-/*
-let receiver = AsyncReader<Message>::new();
-while !receiver.done() {
-    receiver.async_read();
-}
-
-let message = receiver.finish()?;
-
-let sender = AsyncWriter<Message>::new(message);
-while !sender.done() {
-    sender.async_write();
-}
-
-sender.result()?;
-*/
 
 impl<T : ByteBuffer + Default> AsyncWriter<T> {
     pub fn new(buffer : T) -> AsyncWriter<T> {
@@ -212,8 +143,7 @@ impl<T : ByteBuffer + Default> AsyncWriter<T> {
     }
 
     pub fn async_write<W : AsyncWrite>(&mut self, writer : &mut W) {
-        let mut data = self.buffer.get_data(self.bytes_written);
-        let buffer = data.as_buffer();
+        let mut buffer = self.buffer.get_data(self.bytes_written);
         match writer.partial_write_async(buffer) {
             AsyncResult::Ok(Async::NotReady) => {
                 self.done = true;
@@ -235,19 +165,19 @@ impl AsyncRead for TcpStream { }
 impl AsyncWrite for TcpStream { }
 
 impl ByteBuffer for Message {
-    fn get_data(&mut self, location : usize) -> DataWrapper {
+    fn get_data(&mut self, location : usize) -> &mut [u8] {
         match location {
             0...1 => {
-                DataWrapper::from_partial_u16(self.message_type, location, std::mem::size_of::<u16>())
+                &mut self.message_type[location..]
             },
             2...5 => {
-                DataWrapper::from_partial_u32(self.length, location - 2, std::mem::size_of::<u32>())
+                &mut self.length[(location - 2)..]
             },
             _ => {
-                if location - 6 > self.length as usize {
-                    DataWrapper::Empty
+                if location - 6 > self.length() as usize {
+                    &mut []
                 } else {
-                    DataWrapper::LargeBorrowed(&mut self.data[(location - 6)..])
+                    &mut self.data[(location - 6)..]
                 }
             }
         }
@@ -255,29 +185,14 @@ impl ByteBuffer for Message {
 
     fn get_storage(&mut self, location : usize) -> &mut [u8] {
         match location {
-            0 => {
-                self.data.resize(2, 0);
-                &mut self.data[location..]
+            0...1 => {
+                &mut self.message_type[location..]
             },
-            1 => {
-                &mut self.data[location..]
-            },
-            2 => {
-                self.message_type = NetworkEndian::read_u16(&self.data[..]);
-                self.data.resize(4,0);
-                &mut self.data[(location - 2)..]
-            },
-            3...5 => {
-                &mut self.data[(location - 2)..]
-            } ,
-            6 => {
-                self.length = NetworkEndian::read_u32(&self.data[..]);
-                self.data.clear();
-                self.data.resize(self.length as usize,0);
-                &mut self.data[(location - 6)..]
+            2...5 => {
+                &mut self.length[(location - 2)..]
             },
             _ => {
-                if location - 6 > self.length as usize {
+                if location - 6 > self.length() as usize {
                     &mut[]
                 } else {
                     &mut self.data[(location - 6)..]
@@ -287,21 +202,28 @@ impl ByteBuffer for Message {
     }
 }
 
+//TODO: Create helper function for internal read/write (types/length/data)
 impl Message {
     pub fn new(message_type: u16, length: u32, data: Vec<u8>) -> Message {
+        let mut type_buffer :[u8; 2] = [0;2];
+        NetworkEndian::write_u16(&mut type_buffer[..], message_type);
+
+        let mut length_buffer :[u8; 4] = [0;4];
+        NetworkEndian::write_u32(&mut length_buffer[..], length);
+
         Message {
-            message_type,
-            length,
+            message_type : type_buffer,
+            length : length_buffer,
             data
         }
     }
 
     pub fn message_type(&self) -> u16 {
-        self.message_type
+        NetworkEndian::read_u16(&self.message_type[..])
     }
 
     pub fn length(&self) -> u32 {
-        self.length
+        NetworkEndian::read_u32(&self.length[..])
     }
 
     pub fn data(&self) -> &[u8] {
@@ -310,19 +232,39 @@ impl Message {
 
     pub fn from_reader<T: Read>(reader: &mut T) -> io::Result<Self> {
         let mut message = Message {
-            message_type: 0,
-            length: 0,
+            message_type: [0; 2],
+            length: [0; 4],
             data: Vec::new()
         };
 
-        //TODO: We shouldn't enforce the endianess at this level. we can't assume we are reading from network
-        message.message_type = reader.read_u16::<NetworkEndian>()?;
-        message.length = reader.read_u32::<NetworkEndian>()?;
-        message.data = vec![0; message.length as usize];
-
+        // Read Type
         let mut total_bytes_read = 0;
+        while total_bytes_read < 2 {
+            total_bytes_read += reader.read(&mut message.message_type[total_bytes_read..]).or_else(|err| {
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    Ok(0)
+                } else {
+                    Err(err)
+                }
+            })?;
+        };
 
-        while total_bytes_read < message.length as usize {
+        // Read Length
+        total_bytes_read = 0;
+        while total_bytes_read < 4 {
+            total_bytes_read += reader.read(&mut message.length[total_bytes_read..]).or_else(|err| {
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    Ok(0)
+                } else {
+                    Err(err)
+                }
+            })?;
+        };
+
+        // Read Data
+        total_bytes_read = 0;
+        message.data = vec![0; message.length() as usize];
+        while total_bytes_read < message.length() as usize {
             total_bytes_read += reader.read(&mut message.data[total_bytes_read..]).or_else(|err| {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     Ok(0)
@@ -337,14 +279,37 @@ impl Message {
 
     pub fn into_writer<T: Write>(mut self, writer: &mut T) -> io::Result<()> {
 
-        //TODO: We shouldn't enforce the endianess at this level. we can't assume we are reading from network
-        writer.write_u16::<NetworkEndian>(self.message_type)?;
-        writer.write_u32::<NetworkEndian>(self.length)?;
-
         let mut total_bytes_written = 0;
 
-        //TODO: Handle a case of 0 bytes written (not in interrupted error case)
-        while total_bytes_written < self.length as usize {
+        //TODO: Handle a case of 0 bytes written, it usually mean we have some kind of failure (buffer run out), and we might never manage to get out of the loop.
+        // This is true for all writes loop below
+
+        // Write Type
+        while total_bytes_written < 2 as usize {
+            total_bytes_written += writer.write(&mut self.message_type[total_bytes_written..]).or_else(|err| {
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    Ok(0)
+                } else {
+                    Err(err)
+                }
+            })?;
+        };
+
+        // Write Length
+        total_bytes_written = 0;
+        while total_bytes_written < 4 as usize {
+            total_bytes_written += writer.write(&mut self.length[total_bytes_written..]).or_else(|err| {
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    Ok(0)
+                } else {
+                    Err(err)
+                }
+            })?;
+        };
+
+        // Write Data
+        total_bytes_written = 0;
+        while total_bytes_written < self.length() as usize {
             total_bytes_written += writer.write(&mut self.data[total_bytes_written..]).or_else(|err| {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     Ok(0)

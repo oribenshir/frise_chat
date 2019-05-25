@@ -234,6 +234,10 @@ impl ByteBuffer for Message {
                 if location - 6 > self.length() as usize {
                     &mut[]
                 } else {
+                    if self.data.len() != self.length() as usize {
+                        // Allocate the buffer if needed
+                        self.data.resize(self.length() as usize, 0);
+                    }
                     &mut self.data[(location - 6)..]
                 }
             }

@@ -6,12 +6,13 @@ use std::string::String;
 use byteorder::{NetworkEndian, ByteOrder, ReadBytesExt, WriteBytesExt, NativeEndian};
 use std::net::TcpStream;
 use crate::message::Async::{NotReady, Ready};
+use std::error::Error;
 
 //TODO: We assume we read/write data in network endianness, we should be able to support reading/writing it from/to native endianness as well
 // TODO: If message will implement read trait directly, it will be really easy to compose it with stream (and iterator)
 // TODO: We should be able to return not_ready for write. The client should be able to continue on partial message.
 // TODO: For some weird reason, the reader won't read if there is only a small number of bytes in the stream.
-#[derive(Default, Debug)]
+#[derive(Default, Clone, Debug)]
 pub struct Message {
     message_type : [u8;2],
     length : [u8;4],
@@ -66,12 +67,13 @@ pub struct AsyncReader<T : ByteBuffer + Default> {
     error : Option<io::Error>
 }
 
-pub struct AsyncWriter<T : ByteBuffer + Default> {
+#[derive(Clone)]
+pub struct AsyncWriter<T : Clone + ByteBuffer + Default> {
     buffer : T,
     bytes_written : usize,
     done : bool,
     ready: bool,
-    error : Option<io::Error>
+    error : Option<String>
 }
 
 pub enum AsyncReadResult<T>
@@ -81,7 +83,7 @@ pub enum AsyncReadResult<T>
 }
 
 pub enum AsyncWriteResult<T>
-    where T : ByteBuffer + Default {
+    where T : Clone + ByteBuffer + Default {
     Ready,
     NotReady(AsyncWriter<T>)
 }
@@ -146,7 +148,7 @@ impl<T : ByteBuffer + Default> AsyncReader<T> {
     }
 }
 
-impl<T : ByteBuffer + Default> AsyncWriter<T> {
+impl<T : Clone + ByteBuffer + Default> AsyncWriter<T> {
     pub fn new(buffer : T) -> AsyncWriter<T> {
         AsyncWriter {
             buffer,
@@ -168,7 +170,7 @@ impl<T : ByteBuffer + Default> AsyncWriter<T> {
         }
 
         if let Some(e) = self.error {
-            return Err(e)
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, e))
         }
 
         if self.ready {
@@ -192,7 +194,7 @@ impl<T : ByteBuffer + Default> AsyncWriter<T> {
             },
             AsyncResult::Ok(Async::Ready(bytes)) => self.bytes_written += bytes,
             AsyncResult::Err(error) => {
-                self.error = Some(error);
+                self.error = Some(error.description().to_owned());
                 self.done = true;
             }
         }

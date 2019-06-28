@@ -8,7 +8,39 @@ use tlv_message::message::{AsyncReader, AsyncWriter, Message, AsyncReadResult, A
 
 pub struct Stream {
     stream : TcpStream,
-    async_reader : Option<AsyncReader<Message>>
+    async_reader : Option<AsyncReader<Message>>,
+    message_queue : Vec<AsyncWriter<Message>>
+}
+
+impl Stream {
+    fn build(stream : TcpStream) -> Stream {
+        Stream{
+            stream,
+            async_reader : None,
+            message_queue : Vec::new()
+        }
+    }
+
+    fn write_messages_to_stream(&mut self) {
+        let mut incomplete_message_queue =  Vec::<AsyncWriter<Message>>::new();
+
+        while let Some(mut message) = self.message_queue.pop() {
+            // Write as much as we can without sleeping
+            while !message.done() {
+                message.async_write(&mut self.stream);
+            }
+
+            // Check everything went as expected, at the moment just crash, later on we will want to remove stream from the room as we are out of sync
+            let result = message.finish().expect("failed to write message to client");
+
+            // Check the result, if we didn't send all of the message we will want to continue it on the next loop
+            if let AsyncWriteResult::NotReady(message) = result {
+                incomplete_message_queue.push(message);
+            }
+        }
+
+        self.message_queue = incomplete_message_queue;
+    }
 }
 
 pub struct ChatRoom {
@@ -55,27 +87,13 @@ impl ChatRoom {
     }
 
     pub fn broadcast_pending_messages(&mut self) {
-        let stream_list = &mut self.stream_list;
-        let message_queue = &mut self.message_queue;
-
-        if !message_queue.is_empty() {
-            println!("I've got a message to send to the room");
-            stream_list.iter_mut().for_each(|mut stream| {
-                while let Some(mut writer) = message_queue.pop() {
-                    while !writer.done() {
-                        println!("async_write hopefully");
-                        writer.async_write(&mut stream.stream);
-                    }
-
-                    let result = writer.finish().expect("failed to write message to client");
-                    if let AsyncWriteResult::NotReady(next_writer) = result {
-                        message_queue.push(next_writer);
-                    }
-                }
-            });
-            // We've sent all the messages in the queue, we can clear it now
-            message_queue.clear();
+        // Loop over through all streams, clone pending messages to stream, and distribute them
+        for stream in &mut self.stream_list {
+            stream.message_queue.append(&mut self.message_queue.clone());
+            stream.write_messages_to_stream();
         }
+        // All messages are now in the streams internal queues, so we can clear this queue
+        self.message_queue.clear();
     }
 }
 
@@ -89,7 +107,7 @@ pub fn chat_room_handler(receiver: mpsc::Receiver<TcpStream>) -> io::Result<()> 
         let _ = receiver.try_recv().map(|stream| {
             println!("Received a new connection to the room");
             stream.set_nonblocking(true).expect("Failed to set socket as non blocking");
-            chat_room.stream_list.push(Stream{stream, async_reader : None });
+            chat_room.stream_list.push(Stream::build(stream));
         });
         println!("looking for new messages");
         // Look for a new message from any of the room's clients

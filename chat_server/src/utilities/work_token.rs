@@ -1,8 +1,40 @@
 use std::sync::{Arc, Mutex, Condvar};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::any::Any;
+use core::borrow::Borrow;
 
-pub type Token = Arc<WorkToken>;
+//TODO:
+// Consider allowing wrapping type inside the token, making it easier to pass it around
+// Consider Rustify this code a little (currently for simplicity, it is a dumb copy of a C++ code I have)
+#[derive(Clone)]
+pub struct Token(Arc<WorkToken>);
 
+// TODO: Split into two similar types cancellation_token and work_token which will do the same, but with different method naming
+impl Token {
+    pub fn build() -> Token {
+       Token(Arc::new(WorkToken::build()))
+    }
+
+    pub fn ready(&self) -> bool {
+        self.0.ready()
+    }
+
+    pub fn canceled(&self) -> bool {
+        self.0.ready()
+    }
+
+    pub fn done(&self) {
+        self.0.done()
+    }
+
+    pub fn cancel(&self) {
+        self.0.done()
+    }
+
+    pub fn wait(&self) {
+        self.0.wait()
+    }
+}
 // Mutex is used to sync the changes to the ready state with the condition variable
 // It is required, as otherwise the thread checking the condition variable might miss notification
 //      coming after checking the ready member, but before going to wait again on the condition variable
@@ -19,6 +51,13 @@ pub struct WorkToken {
 }
 
 impl WorkToken {
+    pub fn build() -> WorkToken {
+        WorkToken {
+            ready : AtomicBool::new(false),
+            mutex : Mutex::new(()),
+            cv : Condvar::new()
+        }
+    }
     // We don't promise this will return the latest value, as we are not using a lock.
     // We just guarantee the value returned will be valid(e.g. no changes mid=flight).
     pub fn ready(&self) -> bool {
@@ -35,6 +74,8 @@ impl WorkToken {
 
     pub fn wait(&self) {
         // We unwrap the condition variable and the lock as threads holding the lock shouldn't be panicking.
-        self.cv.wait_until(self.mutex.lock().unwrap(), |()| {self.ready.load(Ordering::Relaxed)}).unwrap();
+        let _guard = self.cv.wait_until(self.mutex.lock().unwrap(), |_| {
+            self.ready.load(Ordering::Relaxed)
+        }).unwrap();
     }
 }

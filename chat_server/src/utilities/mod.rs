@@ -1,1 +1,1 @@
-mod work_token;
+pub mod work_token;

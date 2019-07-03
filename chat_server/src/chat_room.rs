@@ -5,6 +5,7 @@ use std::{
 };
 
 use tlv_message::message::{AsyncReader, AsyncWriter, Message, AsyncReadResult, AsyncWriteResult};
+use crate::utilities::work_token::Token;
 
 pub struct Stream {
     stream : TcpStream,
@@ -97,12 +98,15 @@ impl ChatRoom {
     }
 }
 
-pub fn chat_room_handler(receiver: mpsc::Receiver<TcpStream>) -> io::Result<()> {
+pub fn chat_room_handler(receiver: mpsc::Receiver<TcpStream>, cancellation_token : Token) -> io::Result<()> {
     println!("Opening new chat room");
 
     let mut chat_room = ChatRoom::new();
 
     loop {
+        if cancellation_token.canceled() {
+            break;
+        }
         // Look for a new connection to the chat room
         let _ = receiver.try_recv().map(|stream| {
             println!("Received a new connection to the room");

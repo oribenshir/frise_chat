@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 
+use crate::utilities::work_token::Token;
 use crate::chat_room;
 
 pub struct RoomManager {
@@ -25,24 +26,32 @@ impl RoomManager {
         }
     }
 
-    pub fn activate(mut self) -> io::Result<()> {
+    pub fn activate(mut self, cancellation_token : Token) -> io::Result<()> {
+        //TODO: currently we wait on the mspc during cancellation, we need to find a way to overcome it
         while let Some(stream) = self.receiver.iter().next() {
-            self.handle_connection(stream)?;
+            let connection_token = cancellation_token.clone();
+            self.handle_connection(stream, connection_token)?;
+
+            if cancellation_token.canceled() {
+                break;
+            }
         }
 
+        println!("waiting for pool to finish");
         self.pool.join();
+        println!("pool finished its job");
         Ok(())
     }
 
-    fn handle_connection(&mut self, stream: TcpStream) -> io::Result<()> {
+    fn handle_connection(&mut self, stream: TcpStream, cancellation_token : Token) -> io::Result<()> {
         println!("handling new connection");
         let room_name = self.get_room_name(&stream)?;
 
         let mut room_dispatch = self.room_list.get(&room_name);
 
         if room_dispatch.is_none() {
-                println!("Room {} not found", room_name);
-                room_dispatch = self.create_room(&room_name);
+            println!("Room {} not found", room_name);
+            room_dispatch = self.create_room(&room_name, cancellation_token);
         }
 
         room_dispatch.and_then(|rx| {
@@ -51,7 +60,7 @@ impl RoomManager {
         }).ok_or(Error::new(ErrorKind::Other, "Failed to dispatch client to room"))
     }
 
-    fn create_room(&mut self, room_name: &str) -> Option<&mpsc::Sender<TcpStream>> {
+    fn create_room(&mut self, room_name: &str, cancellation_token : Token) -> Option<&mpsc::Sender<TcpStream>> {
         if self.pool.active_count() >= self.num_threads {
             println!("Thread Pool is full");
             None
@@ -59,7 +68,7 @@ impl RoomManager {
             let (tx, rx) = mpsc::channel();
             self.pool.execute(move || {
                 //TODO: Add an exit mechanism
-                if chat_room::chat_room_handler(rx).is_err() {
+                if chat_room::chat_room_handler(rx, cancellation_token).is_err() {
                     println!("Error in chat room handler");
                 };
             });

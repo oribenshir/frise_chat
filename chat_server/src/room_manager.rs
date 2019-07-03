@@ -1,5 +1,5 @@
 use std::net::{TcpStream};
-use std::{io};
+use std::{io, thread};
 use std::io::{BufRead, BufReader};
 use threadpool::ThreadPool;
 use std::sync::mpsc;
@@ -8,12 +8,20 @@ use std::io::{Error, ErrorKind};
 
 use crate::utilities::work_token::Token;
 use crate::chat_room;
+use std::thread::JoinHandle;
 
+/// Manages the different chat rooms,
+/// Will redirect new connections to the appropriate room
 pub struct RoomManager {
     receiver : mpsc::Receiver<TcpStream>,
     pool : ThreadPool,
     num_threads : usize,
     room_list : HashMap<String, mpsc::Sender<TcpStream>>,
+}
+
+/// Very simple wrapper around the room manager. Allow to manage it in dedicate thread
+pub struct RoomManagerHandler {
+    handler : JoinHandle<()>
 }
 
 impl RoomManager {
@@ -27,7 +35,6 @@ impl RoomManager {
     }
 
     pub fn activate(mut self, cancellation_token : Token) -> io::Result<()> {
-        //TODO: currently we wait on the mspc during cancellation, we need to find a way to overcome it
         while let Some(stream) = self.receiver.iter().next() {
             let connection_token = cancellation_token.clone();
             self.handle_connection(stream, connection_token)?;
@@ -37,9 +44,7 @@ impl RoomManager {
             }
         }
 
-        println!("waiting for pool to finish");
         self.pool.join();
-        println!("pool finished its job");
         Ok(())
     }
 
@@ -83,5 +88,25 @@ impl RoomManager {
         let mut message = String::new();
         reader.read_line(&mut message)?;
         Ok(message)
+    }
+}
+
+impl RoomManagerHandler {
+    pub fn spawn(receiver : mpsc::Receiver<TcpStream>, num_threads : usize, room_manager_token : Token) -> RoomManagerHandler {
+        let handler = thread::spawn(move || {
+            let room_manager = RoomManager::new(receiver, 16);
+
+            if room_manager.activate(room_manager_token).is_err(){
+                println!("Error in room manager");
+            }
+        });
+
+        RoomManagerHandler {
+            handler
+        }
+    }
+
+    pub fn join(self) -> thread::Result<()> {
+        self.handler.join()
     }
 }

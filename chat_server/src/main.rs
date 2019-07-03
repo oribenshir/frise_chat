@@ -11,6 +11,7 @@ mod chat_room;
 mod room_manager;
 mod utilities;
 mod server;
+mod client;
 
 use crate::room_manager::{RoomManager, RoomManagerHandler};
 
